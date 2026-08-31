@@ -1,3 +1,3 @@
-input_full.txt
+*.txt
 /Output
 /venv
