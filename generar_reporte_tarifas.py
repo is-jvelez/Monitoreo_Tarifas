@@ -7,11 +7,10 @@ Automatiza lo que hoy se hace a mano:
   2. Genera Resumen_tarifas.xlsx: una hoja "Resumen general" (una fila por
      categoria) + una hoja por categoria con la lista de tarifas ELEGIBLES y la
      observacion que trae cada linea (Estado=1-Inactivo, No_intentos, etc.).
-  3. Genera los .sql de actualizacion (UPDATE) en <salida>/Update/, uno por
-     categoria con tarifas elegibles.
-  4. Genera la version "lite" de esos UPDATE en <salida>/update_lite/ (un solo
-     UPDATE ... WHERE Name IN (...), sin transaccion ni tabla variable).
-  5. Genera los .sql de consulta/verificacion post-regularizacion en
+  3. Genera los .sql de actualizacion en <salida>/Update/, uno por categoria
+     con tarifas elegibles (un UPDATE ... WHERE ProcesadoEstado = 2 AND
+     Name IN (...), a partir de las plantillas templates/update_lite_*.sql).
+  4. Genera los .sql de consulta/verificacion post-regularizacion en
      <salida>/Queries/, uno por categoria con tarifas elegibles.
 
 USO:
@@ -51,7 +50,7 @@ genera los .sql -- revisar SIEMPRE el bloque "ADVERTENCIA" que imprime):
   - Antes de escribir, se borran los script_*.sql de una corrida anterior en la
     misma carpeta de salida, para que nunca quede un UPDATE viejo junto al nuevo.
 
-Las plantillas SQL (Update, update_lite y Queries) NO estan embebidas en este
+Las plantillas SQL (update_lite_* y consulta_*) NO estan embebidas en este
 archivo: viven como .sql sueltos en la carpeta templates/, junto a este script.
 Si clonaste el repo, ya deberian estar ahi. Si copiaste solo este .py a otro
 lado, el script va a fallar con un error claro indicando que falta la
@@ -339,16 +338,15 @@ def escribir_excel(resultado: dict, columnas: list, filas: list, ruta_excel: Pat
 
 
 # ---------------------------------------------------------------------------
-# Scripts SQL por categoria: UPDATE (Update/), UPDATE lite (update_lite/) y
-# CONSULTA de verificacion post-regularizacion (Queries/).
+# Scripts SQL por categoria: UPDATE (Update/, a partir de las plantillas
+# update_lite_*) y CONSULTA de verificacion post-regularizacion (Queries/).
 #
 # Las plantillas NO estan embebidas aqui: viven como archivos .sql sueltos
 # en templates/ (junto a este script), para poder versionarlas y editarlas
 # sin tocar el .py. Placeholders:
 #   {HEADER}            -> comentario armado en runtime (fecha + cantidad de
 #                           tarifas elegibles).
-#   {FECHA_COMPACTA}    -> solo en update_lite_*: AAAAMMDD para ProcesadoMensaje.
-#   (<lista_tarifas>)   -> en update_*: bloque ('COD1'), ('COD2'), ...
+#   {FECHA_COMPACTA}    -> en update_lite_*: AAAAMMDD para ProcesadoMensaje.
 #   <lista_tarifas_in>  -> en update_lite_*: bloque 'COD1', 'COD2', ... de un IN.
 #   <lista_tarifas_XXX> -> en consulta_*: bloque 'COD1', 'COD2', ... de un IN.
 #
@@ -356,10 +354,10 @@ def escribir_excel(resultado: dict, columnas: list, filas: list, ruta_excel: Pat
 # alguno sin reemplazar, el script se detiene sin escribir ningun .sql.
 #
 # Si una categoria queda con 0 tarifas elegibles, NO se genera su .sql (en
-# ningun tipo): un UPDATE con @Tarifas vacia no aporta nada, y un
-# WHERE ... IN () con lista vacia es directamente SQL invalido.
+# ningun tipo): un WHERE ... IN () con lista vacia es SQL invalido.
 # ---------------------------------------------------------------------------
 
+# update_lite/ ya no se genera, pero se incluye para limpiar corridas anteriores.
 SUBCARPETAS_SQL = ("Update", "update_lite", "Queries")
 
 PLACEHOLDER_CONSULTA = {
@@ -393,21 +391,15 @@ def _reemplazar(contenido: str, placeholder: str, valor: str, nombre_plantilla: 
     return contenido.replace(placeholder, valor)
 
 
-def _bloque_lista_tarifas_sql(codigos: list) -> str:
-    lineas = [f"    ('{c}')," for c in codigos[:-1]]
-    lineas.append(f"    ('{codigos[-1]}');")
-    return "\n".join(lineas)
-
-
 def _bloque_lista_in(codigos: list) -> str:
-    """Lista para un WHERE ... IN (...): 'COD1',\n        'COD2', ... (sin
-    parentesis extra por item, a diferencia del INSERT de los .sql de UPDATE)."""
+    """Lista para el WHERE ... IN (...) de las consultas: 'COD1',\n        'COD2', ..."""
     lineas = [f"'{c}'," for c in codigos[:-1]]
     lineas.append(f"'{codigos[-1]}'")
     return "\n        ".join(lineas)
 
 
 def _bloque_lista_lite(codigos: list) -> str:
+    """Lista para el WHERE Name IN (...) de los UPDATE: 'COD1',\n    'COD2', ..."""
     lineas = [f"    '{c}'," for c in codigos[:-1]]
     lineas.append(f"    '{codigos[-1]}'")
     return "\n".join(lineas)
@@ -428,12 +420,6 @@ def _tipos_script(fecha: date):
     return [
         {
             "nombre": "UPDATE", "subcarpeta": "Update", "prefijo_archivo": "script_Regularizacion",
-            "plantilla": "update_{prefijo}.sql", "header": header_update,
-            "placeholder": {cat: "    (<lista_tarifas>);" for cat in CATEGORIAS},
-            "bloque": _bloque_lista_tarifas_sql, "extra": {},
-        },
-        {
-            "nombre": "UPDATE lite", "subcarpeta": "update_lite", "prefijo_archivo": "script_Regularizacion",
             "plantilla": "update_lite_{prefijo}.sql", "header": header_update,
             "placeholder": {cat: "<lista_tarifas_in>" for cat in CATEGORIAS},
             "bloque": _bloque_lista_lite, "extra": {"{FECHA_COMPACTA}": fecha.strftime("%Y%m%d")},

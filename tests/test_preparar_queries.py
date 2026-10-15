@@ -4,10 +4,11 @@
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -110,6 +111,39 @@ class TestMain(unittest.TestCase):
         for nombre in p.QUERIES.values():
             self.assertIn(b"'2026-10-14 15:00:00.000'", (salida / nombre).read_bytes())
             self.assertEqual((self.origen / nombre).read_bytes(), QUERY_EJEMPLO.encode("utf-8"))
+
+    def test_carpeta_de_salida_por_defecto(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            codigo, _ = correr("2026-10-14")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(codigo, 0)
+        diagnostico = self.tmp / f"Output_{date.today():%Y%m%d}" / "Diagnostico"
+        self.assertEqual(len(list(diagnostico.glob("*.sql"))), 4)
+
+    def test_conserva_la_codificacion_utf8(self):
+        nombre = p.QUERIES["Servicios Adicionales"]
+        con_tilde = QUERY_EJEMPLO.replace("Solo lectura", "Solo lectura (tamaño)")
+        (self.origen / nombre).write_bytes(con_tilde.encode("utf-8"))
+        salida = self.tmp / "out"
+        codigo, _ = correr("2026-10-14", "--salida", salida)
+        self.assertEqual(codigo, 0)
+        self.assertIn("tamaño".encode("utf-8"), (salida / nombre).read_bytes())
+
+    def test_falta_una_query(self):
+        (self.origen / p.QUERIES["Aduana"]).unlink()
+        salida = self.tmp / "out"
+        codigo, texto = correr("2026-10-14", "--salida", salida)
+        self.assertEqual(codigo, 1)
+        self.assertIn("no se encontro", texto)
+        self.assertFalse(salida.exists())
+
+    def test_fecha_invalida_es_error_de_argumentos(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+            p.main(["14/10/2026"])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_si_una_query_escribe_no_genera_ninguna(self):
         ruta = self.origen / p.QUERIES["Contenedor"]
