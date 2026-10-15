@@ -1,3 +1,6 @@
 *.txt
+!requirements.txt
 /Output
+/Output_*/
 /venv
+__pycache__/

@@ -1,233 +1,194 @@
 # generar_reporte_tarifas.py
 
-Automatiza el proceso mensual de regularización de tarifas (Aduana, Carga
-Suelta, Contenedor, Servicios Adicionales):
+Automatiza el proceso de regularización de tarifas (Aduana, Carga Suelta,
+Contenedor, Servicios Adicionales) que quedaron con `ProcesadoEstado = 2`:
 
 1. Parsea el texto que arrojan las 4 consultas de tarifas, tal como se pega
    desde SSMS (no depende de encabezados de categoría ni de un orden fijo).
 2. Genera `Resumen_tarifas.xlsx` con una hoja de resumen general (una fila
-   por categoría) y una hoja por categoría con la lista de tarifas elegibles.
+   por categoría) y una hoja por categoría con la lista de tarifas elegibles
+   y su observación (Estado=1-Inactivo, `No_intentos`, ganadora de duplicado…).
 3. Genera los `.sql` de **actualización** (`Update/script_Regularizacion_<PREFIJO>.sql`)
-   para dejar en `ProcesadoEstado = 0` las tarifas elegibles.
-4. Genera los `.sql` de **consulta/verificación post-regularización**
+   para dejar en `ProcesadoEstado = 0` las tarifas elegibles (con transacción
+   y tabla variable).
+4. Genera la versión **lite** de esos mismos UPDATE
+   (`update_lite/script_Regularizacion_<PREFIJO>.sql`): un único
+   `UPDATE ... WHERE Name IN (...)`, sin transacción ni `USE`.
+5. Genera los `.sql` de **consulta/verificación post-regularización**
    (`Queries/script_consulta_<PREFIJO>.sql`) para revisar el estado después
    de que corra el Job.
 
 Si una categoría queda con 0 tarifas elegibles en la corrida, no se genera
-ni su `.sql` de actualización ni el de consulta para esa categoría (un
-`UPDATE`/`IN (...)` con lista vacía no tiene sentido o directamente no es
-SQL válido).
+ninguno de sus `.sql` (un `UPDATE`/`IN (...)` con lista vacía no tiene
+sentido o directamente no es SQL válido).
+
+## Medidas de seguridad
+
+- **Si hay cualquier ADVERTENCIA, no se genera ningún `.sql`**: el conteo de
+  códigos no coincide con "Elegibles para UPDATE", hay un bloque sin
+  identificar, códigos repetidos o de otra categoría, etc. El Excel sí se
+  genera para que puedas revisar, y el script termina con código de salida 1.
+  Solo con `--forzar` se generan igual (no recomendado).
+- **Los códigos se validan** con el formato `<PREFIJO>_<número>_<año>`. Si
+  alguno no lo cumple, no se genera ningún `.sql`, ni siquiera con `--forzar`.
+- **Se borran los `.sql` de una corrida anterior** (`script_*.sql` dentro de
+  `Update/`, `update_lite/` y `Queries/`) antes de escribir. Así no puede
+  quedar un UPDATE viejo de una categoría que hoy tiene 0 elegibles.
+- **Se verifican las plantillas**: si una plantilla no trae su placeholder
+  (por ejemplo, porque alguien la re-indentó) o queda alguno sin reemplazar,
+  el script se detiene sin escribir nada.
 
 ## Estructura del repositorio
 
 ```
+preparar_queries.py          <- paso previo: fecha de inicio en las 4 queries
+01_QueriesTarifas/           <- queries de diagnostico (script-T*-Regularizacion.sql)
 generar_reporte_tarifas.py
 templates/
   update_DTYT.sql            <- plantilla del UPDATE de Aduana
   update_DCCS.sql            <- Carga Suelta
   update_DCCO.sql            <- Contenedor
   update_DCSA.sql            <- Servicios Adicionales
+  update_lite_DTYT.sql       <- plantilla del UPDATE lite de Aduana
+  update_lite_DCCS.sql
+  update_lite_DCCO.sql
+  update_lite_DCSA.sql
   consulta_DTYT.sql          <- plantilla de la consulta de Aduana
   consulta_DCCS.sql
   consulta_DCCO.sql
   consulta_DCSA.sql
+tests/
+  test_generar_reporte_tarifas.py
+  test_preparar_queries.py
+requirements.txt
 README.md
 ```
 
-**Importante:** el script NO trae el SQL embebido — lee cada plantilla desde
-`templates/` en tiempo de ejecución, resolviendo la ruta relativa a la
-ubicación del propio `.py` (no a tu carpeta de trabajo). Si clonas el repo
-completo, la carpeta `templates/` ya viene incluida y no tienes que hacer
-nada especial. Si por algún motivo copias solo `generar_reporte_tarifas.py`
-suelto a otro lado (sin la carpeta `templates/`), el script se detiene con
-un error claro indicando qué plantilla falta y dónde la buscó — no falla en
-silencio ni genera un `.sql` a medias.
+El script lee cada plantilla desde `templates/` en tiempo de ejecución,
+resolviendo la ruta relativa a la ubicación del propio `.py` (no a tu
+carpeta de trabajo). Si necesitas editar el SQL de una categoría, edita el
+`.sql` correspondiente en `templates/`; no hace falta tocar el `.py`.
+Placeholders que deben mantenerse:
 
-Si necesitas editar el SQL de una categoría (por ejemplo, agregar una
-columna a la consulta de Contenedor), edita el `.sql` correspondiente en
-`templates/` directamente — no hace falta tocar el `.py`.
+| Plantilla | Placeholders |
+|---|---|
+| `update_*.sql` | `{HEADER}` y la línea `    (<lista_tarifas>);` (con 4 espacios) |
+| `update_lite_*.sql` | `{HEADER}`, `{FECHA_COMPACTA}` (AAAAMMDD) y `<lista_tarifas_in>` |
+| `consulta_*.sql` | `{HEADER}` y `<lista_tarifas_aduana>` / `_CargaSuelta` / `_Contenedor` / `_ServiciosAdicionales` |
 
 ---
 
 ## 1. Requisitos
 
-- Python 3.9 o superior instalado (`python --version` para confirmar).
-- Acceso de escritura a la carpeta donde vas a correr el script.
-
-No necesitas SQL Server ni conexión a base de datos para correr el script:
-solo trabaja sobre el `.txt` de entrada que tú generas pegando el resultado
-de las 4 consultas en SSMS.
+- Python 3.9 o superior (`python --version` para confirmar).
+- No necesitas SQL Server ni conexión a base de datos: el script solo
+  trabaja sobre el `.txt` de entrada y genera archivos.
 
 ## 2. Instalación (una sola vez por máquina/carpeta)
 
-Clona el repositorio (o `git pull` si ya lo tienes) para asegurarte de
-tener `generar_reporte_tarifas.py` **junto con** la carpeta `templates/` —
-ambos vienen versionados juntos.
-
-Luego, desde PowerShell, parado en la carpeta del repo:
+Desde PowerShell, en la carpeta del repo:
 
 ```powershell
-# 1. Crear un entorno virtual (aisla las librerías de este proyecto del resto de tu PC)
 python -m venv venv
-
-# 2. Activarlo
 .\venv\Scripts\Activate.ps1
-
-# Deberias ver "(venv)" al inicio de la linea del prompt despues de esto.
-
-# 3. Instalar las librerias necesarias
-pip install pandas openpyxl
-```
-
-Si prefieres dejar las versiones fijadas para poder reinstalar exactamente
-lo mismo en otra máquina:
-
-```powershell
-pip freeze > requirements.txt
-```
-
-Y en la otra máquina, con su propio venv activado:
-
-```powershell
 pip install -r requirements.txt
 ```
 
-**Cada vez que vuelvas a trabajar en este proyecto** (otro día, otra sesión
-de PowerShell), solo necesitas activar el venv de nuevo — no reinstalar:
-
-```powershell
-.\venv\Scripts\Activate.ps1
-```
+La única dependencia es `openpyxl` (ya no se usa `pandas`). Cada vez que
+vuelvas a trabajar en el proyecto solo necesitas activar el venv:
+`.\venv\Scripts\Activate.ps1`.
 
 ## 3. Preparar el archivo de entrada
 
-1. Corre en SSMS las 4 consultas de tarifas (Aduana, Carga Suelta,
-   Contenedor, Servicios Adicionales) como ya lo haces.
-2. Pega el resultado completo de las 4 (los bloques `[ELEGIBLE] ...` y sus
-   respectivas líneas `Resumen -> ...`) en un único archivo de texto, por
-   ejemplo `entrada.txt`. El orden entre categorías no importa.
+### 3.1 Poner la misma fecha de inicio en las 4 queries
+
+```powershell
+python .\preparar_queries.py "2026-10-14 15:00"
+```
+
+Copia los 4 `script-T*-Regularizacion.sql` de `01_QueriesTarifas/` a
+`Output_<AAAAMMDD>\Diagnostico\`, con `@fechaCreacion` igual a la fecha
+indicada (`AAAA-MM-DD`, `AAAA-MM-DD HH:MM` o `AAAA-MM-DD HH:MM:SS`). Los
+originales no se modifican. Muestra la fecha que tenía cada query antes,
+para que veas si estaban desalineadas. Con `--salida CARPETA` puedes elegir
+otra carpeta.
+
+Las 4 queries son **solo lectura**: identifican las tarifas elegibles e
+imprimen el detalle, pero no tienen `UPDATE`, `INSERT`, `DELETE` ni
+transacciones (solo usan tablas temporales `#`), así que se pueden ejecutar
+en producción sin riesgo. Como resguardo, `preparar_queries.py` revisa cada
+query y **no genera ninguna copia** si encuentra una sentencia de escritura
+o si falta el `DECLARE @fechaCreacion`. La regularización se hace después,
+con los `.sql` de `Update\` o `update_lite\`.
+
+### 3.2 Ejecutarlas y armar el `.txt`
+
+1. Abre en SSMS las 4 queries de `Output_<AAAAMMDD>\Diagnostico\` y ejecútalas.
+2. De cada una, copia la pestaña **Messages** completa (Ctrl+A, Ctrl+C) y
+   pégala en un único `.txt`, por ejemplo `entrada.txt`. El script solo usa
+   las líneas `[ELEGIBLE] ...` y `Resumen -> ...` e ignora el resto. El orden
+   entre categorías no importa, y la codificación tampoco (UTF-8, ANSI o
+   UTF-16/"Unicode" de SSMS).
 
 ## 4. Uso
 
 ```powershell
-python .\generar_reporte_tarifas.py <archivo_entrada.txt> <carpeta_salida>
+python .\generar_reporte_tarifas.py <archivo_entrada.txt> [carpeta_salida] [--fecha AAAA-MM-DD] [--forzar]
 ```
 
-Ejemplo real:
+- `carpeta_salida` es opcional: por defecto se crea `Output_<AAAAMMDD>` con la
+  fecha de la corrida.
+- `--fecha` cambia la fecha de los encabezados y de `ProcesadoMensaje` en los
+  lite. Sirve para regenerar exactamente una corrida anterior.
+- `--forzar` genera los `.sql` aunque haya advertencias.
+
+Ejemplo:
 
 ```powershell
-python .\generar_reporte_tarifas.py entrada.txt Output
+python .\generar_reporte_tarifas.py input_full_28_08-06_10_26.txt
 ```
 
-Esto crea (o reutiliza si ya existe) la carpeta `Output` con:
+Resultado:
 
 ```
-Output/
-  Resumen_tarifas.xlsx        <- hoja "Resumen general" + 1 hoja por categoria
-  Update/
-    script_Regularizacion_DTYT.sql   (Aduana, si tiene elegibles)
-    script_Regularizacion_DCCO.sql   (Contenedor, si tiene elegibles)
-    script_Regularizacion_DCCS.sql   (Carga Suelta, si tiene elegibles)
-    script_Regularizacion_DCSA.sql   (Servicios Adicionales, si tiene elegibles)
-  Queries/
-    script_consulta_DTYT.sql         (mismos criterios que Update/)
-    script_consulta_DCCO.sql
-    script_consulta_DCCS.sql
-    script_consulta_DCSA.sql
+Output_20261015/
+  Resumen_tarifas.xlsx
+  Update/       script_Regularizacion_<PREFIJO>.sql   (solo categorías con elegibles)
+  update_lite/  script_Regularizacion_<PREFIJO>.sql
+  Queries/      script_consulta_<PREFIJO>.sql
 ```
 
-### Salida por consola
+Códigos de salida: `0` = OK, `1` = hubo advertencias/errores y no se
+generaron los `.sql`, `2` = argumentos inválidos.
 
-Al terminar, el script imprime un resumen de lo que generó, por ejemplo:
+## 5. Tests
 
-```
-Listo. Archivos generados en: C:\...\Output
-  (Aduana: 51 tarifas elegibles -> hoja 'Aduana' en el Excel)
-  (Carga Suelta: 0 tarifas elegibles -> hoja 'Carga Suelta' en el Excel)
-  (Contenedor: 20 tarifas elegibles -> hoja 'Contenedor' en el Excel)
-  (Servicios Adicionales: 262 tarifas elegibles -> hoja 'Servicios Adicionales' en el Excel)
-  Resumen_tarifas.xlsx (hoja 'Resumen general' + una hoja por categoria)
-  Update\script_Regularizacion_DTYT.sql -> 51 tarifas (Aduana)
-  Update\script_Regularizacion_DCCO.sql -> 20 tarifas (Contenedor)
-  Update\script_Regularizacion_DCSA.sql -> 262 tarifas (Servicios Adicionales)
-  (sin script de UPDATE, 0 tarifas elegibles: Carga Suelta)
-  Queries\script_consulta_DTYT.sql -> 51 tarifas (Aduana)
-  Queries\script_consulta_DCCO.sql -> 20 tarifas (Contenedor)
-  Queries\script_consulta_DCSA.sql -> 262 tarifas (Servicios Adicionales)
-  (sin script de consulta, 0 tarifas elegibles: Carga Suelta)
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-Si el archivo de entrada no tiene el formato esperado (bloques o líneas
-`Resumen ->` incompletas, prefijo de tarifa desconocido, dos bloques que
-parecen ser de la misma categoría, etc.), el script imprime primero un
-bloque `ADVERTENCIA - revisar antes de usar el resultado:` con el detalle.
-**No ignores esas advertencias** — el script prefiere avisar y seguir con
-lo que sí pudo parsear, en vez de adivinar en silencio.
+Los tests no necesitan librerías extra (usan `unittest` de Python). Cubren
+el parser, la validación, el bloqueo de los `.sql` ante advertencias, la
+limpieza de corridas anteriores, la lectura en UTF-16 y la verificación de
+plantillas.
 
-## 5. Cómo probarlo (checklist)
+## 6. Checklist antes de ejecutar los `.sql` en la base
 
-Antes de confiar en una corrida nueva (por ejemplo, después de editar el
-script), verifica lo siguiente:
+1. El script terminó sin bloque `ADVERTENCIA`.
+2. En `Resumen_tarifas.xlsx`, los conteos de "Resumen general" coinciden con
+   lo que mostró SSMS.
+3. Revisa a ojo al menos un `.sql` de cada carpeta: el encabezado tiene la
+   fecha correcta y el número de tarifas esperado.
+4. El script no ejecuta nada en la base: los `.sql` los corres tú en SSMS.
 
-1. **Corre sin errores de Python.**
-   ```powershell
-   python .\generar_reporte_tarifas.py entrada.txt Output
-   ```
-   Si sale `ModuleNotFoundError`, no tienes el venv activado o falta
-   `pip install pandas openpyxl` (ver sección 2). Si sale
-   `FileNotFoundError` mencionando una plantilla, te falta la carpeta
-   `templates/` junto al script (ver "Estructura del repositorio" arriba).
-
-2. **No debe imprimir ningún bloque `ADVERTENCIA`.** Si aparece, léelo:
-   te dice exactamente qué categoría o bloque no pudo asignar con
-   confianza.
-
-3. **Los conteos deben calzar.** El script ya valida internamente que la
-   cantidad de códigos `[ELEGIBLE]` parseados coincida con el número que
-   dice "Elegibles para UPDATE" en el propio `Resumen ->` de la consulta
-   SQL original — si no calzan, sale como advertencia. Aun así, es buena
-   práctica que tú mismo compares una vez el número de filas de una hoja
-   del Excel (por categoría) contra el total que muestra SSMS.
-
-4. **Abre `Resumen_tarifas.xlsx`** y confirma:
-   - La hoja "Resumen general" tiene una fila por categoría con las
-     estadísticas correctas (Evaluadas, Incompletas, Elegibles, etc.).
-   - Cada hoja de categoría (Aduana, Carga Suelta, Contenedor, Servicios
-     Adicionales) lista los códigos esperados, o el mensaje de "sin
-     tarifas elegibles" si esa categoría dio 0.
-
-5. **Revisa al menos un `.sql` de cada carpeta a ojo** (`Update\` y
-   `Queries\`):
-   - Que el comentario del encabezado tenga la fecha de hoy y el número
-     correcto de tarifas.
-   - Que la lista de tarifas no tenga el placeholder sin reemplazar
-     (no debe aparecer el texto `<lista_tarifas...>` en ningún `.sql`
-     generado — si aparece, es un bug).
-   - Que el script cierre bien (`COMMIT TRANSACTION; GO` en los de
-     Update; el `)` o `);` final del `WHERE ... IN (...)` en los de
-     consulta).
-
-6. **El script no ejecuta nada contra la base de datos.** Solo genera
-   archivos de texto. Revisa y corre los `.sql` resultantes tú mismo en
-   SSMS, como cualquier otro script — el script de Python no tiene
-   conexión a SQL Server.
-
-## 6. Problemas comunes
+## 7. Problemas comunes
 
 | Síntoma | Causa probable | Solución |
 |---|---|---|
-| `ModuleNotFoundError: No module named 'pandas'` | Venv no activado o librerías no instaladas | `.\venv\Scripts\Activate.ps1` y luego `pip install pandas openpyxl` |
-| `FileNotFoundError: No se encontro la plantilla '...' en ...\templates` | Copiaste/moviste `generar_reporte_tarifas.py` sin la carpeta `templates/` | Cerciórate de tener el repo completo (`git pull`); ambos deben estar en la misma carpeta |
-| Sale el mensaje de uso y termina | Faltó pasar `<entrada.txt>` y/o `<carpeta_salida>` como argumentos | `python .\generar_reporte_tarifas.py entrada.txt Output` (los 2 argumentos son obligatorios) |
-| Los `.txt`/`Tarifas_<PREFIJO>.txt` de versiones anteriores no aparecen | Se eliminó esa generación a pedido explícito; ahora esas listas viven en las hojas del Excel | No es un error — es el comportamiento actual |
-| Una categoría no tiene su `.sql` en `Update\` o `Queries\` | Esa categoría dio 0 tarifas elegibles en la corrida | Comportamiento esperado — revisa la hoja de esa categoría en el Excel para confirmar que en efecto es 0 |
-| Aparece `ADVERTENCIA` mencionando "prefijo desconocido" o "no se pudo asignar categoria por eliminacion" | El texto de SSMS que pegaste no tiene el formato esperado (ver sección 3) | Revisa el `.txt` de entrada; puede faltar una línea `Resumen ->`, o el bloque `[ELEGIBLE]` viene con un prefijo distinto a DTYT/DCCS/DCCO/DCSA |
-
----
-
-**Nota:** este README documenta el comportamiento actual del script
-(incluye Excel multi-hoja y los `.sql` de Update + Queries). El
-docstring dentro del propio `.py` quedó desactualizado en la parte
-que menciona la generación de `.txt` — no afecta el funcionamiento,
-pero si lo editas de nuevo conviene actualizarlo también para que no
-confunda a quien lo lea después.
+| `ModuleNotFoundError: No module named 'openpyxl'` | Venv no activado o librerías no instaladas | `.\venv\Scripts\Activate.ps1` y `pip install -r requirements.txt` |
+| `FileNotFoundError: No se encontro la plantilla '...'` | Moviste el `.py` sin la carpeta `templates/` | Ambos deben estar en la misma carpeta |
+| `NO se generaron los .sql porque hay ADVERTENCIAS` | El `.txt` no tiene el formato esperado o los conteos no calzan | Lee las advertencias, corrige el `.txt` y vuelve a correr |
+| `ERROR: no se pudo escribir '...Resumen_tarifas.xlsx'` | El Excel está abierto | Ciérralo y vuelve a correr |
+| `La plantilla '...' no contiene el placeholder` | Se editó una plantilla y se perdió el placeholder | Restáuralo (ver tabla de placeholders arriba) |
+| Una categoría no tiene su `.sql` | Esa categoría dio 0 tarifas elegibles | Comportamiento esperado |
+| `FileNotFoundError` al escribir un `.sql` con una ruta muy larga | Windows limita las rutas a 260 caracteres | Usa una carpeta de salida con una ruta más corta |
