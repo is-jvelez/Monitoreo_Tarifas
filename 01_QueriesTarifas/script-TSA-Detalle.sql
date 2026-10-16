@@ -193,12 +193,14 @@ ORDER BY Cantidad DESC;
 -- 5.3 Detalle fila por fila de TODAS las que estan en error, con su motivo
 --     (para revisar una por una en Excel/SSMS)
 SELECT
-    RUC as Identificacion, Nombre as Cliente,TarifaName as Tarifa,PkIdDobra as CodigoDobra, Cotizacion, ClienteId, HonorarioId, RutaId, TipoCotizacionId,
-    Precio, TarifaAnulada, CreatedTime, ModifiedTime,
+    RUC as Identificacion, Nombre as Cliente,TarifaName as Tarifa,PkIdDobra as CodigoDobra, Cotizacion, T.ClienteId, T.HonorarioId, T.RutaId, T.TipoCotizacionId,
+    T.Precio, TarifaAnulada, Anulado, CreatedTime, ModifiedTime,
     ProcesadoEstadoActual, ProcesadoMensajeActual, ProcesadoFechaActual,
     EnDobra, ExisteEnDobra,  GroupCount, EsPrimeraDelGrupo,
     Elegible, Motivo
-FROM #Tarifas
+FROM #Tarifas T
+-- LEFT JOIN #DobraTSA D ON T.TarifaName = D.ZohoCrmId
+-- Where Anulado = 0
 ORDER BY Motivo, TarifaName;
 
 -- SELECT COUNT(*) AS Filas, COUNT(DISTINCT TarifaName) AS Distintas FROM #Tarifas;
